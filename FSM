@@ -1,0 +1,363 @@
+using System;
+using System.IO;
+using System.Collections;
+using System.Collections.Generic;
+using Unity.VisualScripting;
+using UnityEngine;
+using Varjo.XR;
+using VarjoExample;
+
+public class FiniteStateMachine : MonoBehaviour
+{
+    private Rigidbody rb;
+    public SimpleController viveController;
+
+    public enum State { Default, PreBlock, PrePractice, Practice, PostPractice, PreTrial, Trial, PostTrial, End };
+    public State currentState;
+
+    public GameObject sphere; // Reference to the sphere GameObject
+    public Paths paths;
+
+    public GameObject startingSpot; // Reference to the StartingSpot GameObject
+    public Collider startingSpotCollider; // Reference to the Collider for the starting spot
+    private int lapCount;
+
+    private string currentBlock;
+    private int shapeOrder;
+    private int trialNumber;
+
+    public int participantIDNumber;
+    private int groupNumber;
+
+    private string pathSettings;
+
+    List<Vector3> positions = new List<Vector3>();
+
+    private string filePath;
+
+    void Start()
+    {
+        Debug.Log("Start");
+        InitializeEyeTracking();
+        Clear();
+        groupNumber = (participantIDNumber % 4);
+        filePath = Path.Combine(Application.persistentDataPath, "ParticipantData.csv");
+        startingSpot.GetComponent<MeshRenderer>().enabled = false;
+        TransitionState(State.Default);
+        lapCount = 0;
+        currentBlock = "N";
+        Write(true, "Participant ID Number: " + participantIDNumber + "/nGroup Number: " + groupNumber);
+        trialNumber = 1;
+        paths.ChangePath(Paths.MovementPath.Off);
+    }
+
+    void Update()
+    {
+        
+        if (Input.GetKeyDown(KeyCode.H))
+            paths.SetHeight();
+        switch (currentState)
+        {
+            case State.Default:
+                if (Input.GetKeyDown(KeyCode.Space))  //next
+                    TransitionState(State.PreBlock);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.PreBlock:
+                if (Input.GetKeyDown(KeyCode.Space))  //next
+                    TransitionState(State.PrePractice);
+                else if (Input.GetKeyDown(KeyCode.R)) //restart for eye tracking
+                    TransitionState(State.PreBlock);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.PrePractice:
+                if (viveController.IsTriggerPulled)   //next when participant is ready
+                    TransitionState(State.Practice);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.Practice:
+                if (paths.distanceElapsed >= 5.0f)    //practice over
+                    TransitionState(State.PostPractice);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.PostPractice:
+                if (Input.GetKeyDown(KeyCode.Y))      //participant ready to move on/next
+                    currentState = State.PreTrial;
+                else if (Input.GetKeyDown(KeyCode.N)) //participant not ready/practice again
+                    currentState = State.Practice;
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.PreTrial:
+                if (viveController.IsTriggerPulled)     //participant ready for trial
+                    TransitionState(State.Trial);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.Trial:
+                //if (startingSpotCollider.bounds.Contains(sphere.transform.position)) 
+                //    lapCount++;
+                StartCoroutine(TrackPosition());
+                if (lapCount >= 7)                    //trial over
+                    TransitionState(State.PostTrial);
+                else if (Input.GetKeyDown(KeyCode.E)) //end
+                    TransitionState(State.End);
+                break;
+            case State.PostTrial:
+                if (Input.GetKeyDown(KeyCode.Space))
+                    if (currentBlock == "D" && trialNumber == 3) //if on last trial
+                        TransitionState(State.Default);
+                    else
+                        TransitionState(State.PreTrial);
+                else if (Input.GetKeyDown(KeyCode.E)) 
+                    TransitionState(State.End);
+                break;
+            case State.End:
+                Clear();
+                break;
+        }
+    }
+
+    void TransitionState(State nextState) //start method for each state
+    {
+
+        switch (nextState)
+        {
+            case State.Default:
+                Debug.Log("Default");
+                paths.ChangePath(Paths.MovementPath.Off);
+                break;
+            case State.PreBlock:
+                //CalibrateEyeTracking();  // Calibrate eye tracking
+                Debug.Log("PreBlock");
+                DetermineNextBlock();
+                GetPathsSettings();
+                Write(true, "Current Block: " + currentBlock + ", Path Setting: " + pathSettings);
+                Debug.Log("Current Block: " + currentBlock + ", Path Setting: " + pathSettings);
+                shapeOrder = UnityEngine.Random.Range(0, 6);
+                Write(true, "Shape Order: " + TranslateShapeOrder(shapeOrder));
+                Debug.Log("Shape Order: " + TranslateShapeOrder(shapeOrder));
+                break;
+            case State.PrePractice:
+                Debug.Log("PrePractice");
+                startingSpot.GetComponent<MeshRenderer>().enabled = true;
+                paths.ChangePath(Paths.MovementPath.Practice);
+                break;
+            case State.Practice:
+                paths.distanceElapsed = 0;
+                Debug.Log("Practice");
+                startingSpot.GetComponent<MeshRenderer>().enabled = false;
+                SetPathsSettings();
+                break;
+            case State.PostPractice:
+                Clear();
+                Debug.Log("PostPractice");
+                //check if participant is ready
+                paths.ChangePath(Paths.MovementPath.Off);
+                break;
+            case State.PreTrial:
+                Debug.Log("PreTrial");
+                startingSpot.GetComponent<MeshRenderer>().enabled = true;
+                SetPathsSettings();
+                //Move user to start position
+                break;
+            case State.Trial:
+                paths.distanceElapsed = 0;
+                Debug.Log("Trial");
+                startingSpot.GetComponent<MeshRenderer>().enabled = false;
+                getPath(trialNumber);
+                lapCount = 0;
+                positions.Clear();
+                break;
+            case State.PostTrial:
+                Debug.Log("PostTrial");
+                for (int i = 0; i < positions.Count; i++)
+                {
+                    String temp = "" + positions[i];
+                    Write(false, temp);
+                }
+                Clear();
+                break;
+            case State.End:
+                Debug.Log("END");
+                break;
+            default:
+                break;
+        }
+        currentState = nextState;
+    }
+
+    void CalibrateEyeTracking()
+    {
+        // Request gaze calibration using the default "Fast" calibration mode.
+        bool success = VarjoEyeTracking.RequestGazeCalibration();
+
+        if (success)
+        {
+            // Calibration request was successful.
+            Debug.Log("Calibration request successful");
+        }
+        else
+        {
+            // Calibration request failed.
+            Debug.Log("Calibration request failed, retrying...");
+        }
+    }
+
+    void InitializeEyeTracking()
+    {
+        VarjoEyeTracking.RequestGazeCalibration();
+    }
+
+    void OnTriggerEnter(Collider other)
+    {
+        lapCount += 1;
+    }
+
+    void DetermineNextBlock()
+    {
+        string[] blocks = new string[] { "N", "A", "B", "C", "D" };
+        int currentIndex = Array.IndexOf(blocks, currentBlock);
+        currentIndex = (currentIndex + 1) % blocks.Length;
+        currentBlock = blocks[currentIndex];
+    }
+
+    void getPath(int trialNumber) //activates desired path shape
+    {
+        Paths.MovementPath[,] pathMappings = new Paths.MovementPath[,] {
+            { Paths.MovementPath.Circle, Paths.MovementPath.Square, Paths.MovementPath.FigureEight },//0
+            { Paths.MovementPath.Circle, Paths.MovementPath.FigureEight, Paths.MovementPath.Square },//1
+            { Paths.MovementPath.Square, Paths.MovementPath.Circle, Paths.MovementPath.FigureEight },//2
+            { Paths.MovementPath.Square, Paths.MovementPath.FigureEight, Paths.MovementPath.Circle },//3
+            { Paths.MovementPath.FigureEight, Paths.MovementPath.Square, Paths.MovementPath.Circle },//4
+            { Paths.MovementPath.FigureEight, Paths.MovementPath.Circle, Paths.MovementPath.Square } //5
+        };
+
+        for (int i = 0; i < pathMappings.GetLength(0); i++) {     // Loop through shape orders
+            for (int j = 0; j < pathMappings.GetLength(1); j++) { // Loop through trial numbers
+                if (i == shapeOrder && j == trialNumber - 1) {
+                    paths.ChangePath(pathMappings[i, j]);
+                    break;
+                }
+            }
+        }
+    }
+
+    void Write(bool writeToInfo, string info) {
+        string path;
+        if (writeToInfo) {
+            path = Path.Combine(Application.persistentDataPath, $"Participant_{participantIDNumber:D4}_Info.csv");
+            if (!File.Exists(path)) File.CreateText(path).Close(); 
+        }
+        else {
+            path = Path.Combine(Application.persistentDataPath, $"Participant_{participantIDNumber:D4}_Block{currentBlock}_Trial{trialNumber}_Data.csv");
+            if (!File.Exists(path)) {
+                using (StreamWriter sw = File.CreateText(path)) {
+                    sw.WriteLine("Date/Time, Position(x), Position(y), Position(z), Gaze(x), Gaze(y), Gaze(z), EyeMeasurements(Left), EyeMeasurements(Right)"); 
+                }
+            }
+        }
+
+        using (StreamWriter sw = File.AppendText(path)) {
+            sw.WriteLine(info);
+        }
+    }
+
+    void SetPathsSettings() //activates desired sphere settings
+    {
+        if (groupNumber == 0 && currentBlock == "A" || groupNumber == 1 && currentBlock == "D" || groupNumber == 2 && currentBlock == "D" || groupNumber == 3 && currentBlock == "B") {
+            //"Static Sphere";
+            paths.renderSphere = true;
+            paths.colorChange = false;
+            paths.ticking = false;
+            paths.dynamicMetronome = false;
+        }
+        if (groupNumber == 0 && currentBlock == "B" || groupNumber == 1 && currentBlock == "C" || groupNumber == 2 && currentBlock == "A" || groupNumber == 3 && currentBlock == "D") {
+            //"Dynamic Sphere";
+            paths.renderSphere = true;
+            paths.colorChange = true;
+            paths.ticking = false;
+            paths.dynamicMetronome = false;
+        }
+        if (groupNumber == 0 && currentBlock == "C" || groupNumber == 1 && currentBlock == "B" || groupNumber == 2 && currentBlock == "C" || groupNumber == 3 && currentBlock == "A") {
+            //"Static Metronome";
+            paths.renderSphere = false;
+            paths.colorChange = false;
+            paths.ticking = true;
+            paths.dynamicMetronome = false;
+        }
+        if (groupNumber == 0 && currentBlock == "D" || groupNumber == 1 && currentBlock == "A" || groupNumber == 2 && currentBlock == "B" || groupNumber == 3 && currentBlock == "C") {
+            //"Dynamic Metronome";
+            paths.renderSphere = false;
+            paths.colorChange = false;
+            paths.ticking = true;
+            paths.dynamicMetronome = true;
+        }
+    }
+
+    void GetPathsSettings() //activates desired sphere settings
+    {
+        if (groupNumber == 0 && currentBlock == "A" || groupNumber == 1 && currentBlock == "D" || groupNumber == 2 && currentBlock == "D" || groupNumber == 3 && currentBlock == "B")
+        {
+            pathSettings = "Static Sphere";
+        }
+        if (groupNumber == 0 && currentBlock == "B" || groupNumber == 1 && currentBlock == "C" || groupNumber == 2 && currentBlock == "A" || groupNumber == 3 && currentBlock == "D")
+        {
+            pathSettings = "Dynamic Sphere";
+        }
+        if (groupNumber == 0 && currentBlock == "C" || groupNumber == 1 && currentBlock == "B" || groupNumber == 2 && currentBlock == "C" || groupNumber == 3 && currentBlock == "A")
+        {
+            pathSettings = "Static Metronome";
+        }
+        if (groupNumber == 0 && currentBlock == "D" || groupNumber == 1 && currentBlock == "A" || groupNumber == 2 && currentBlock == "B" || groupNumber == 3 && currentBlock == "C")
+        {
+            pathSettings = "Dynamic Metronome";
+        }
+    }
+
+    void Clear()
+    {
+        paths.renderSphere = false;
+        paths.ticking = false;
+        paths.renderPath = false;
+    }
+
+    IEnumerator TrackPosition()
+    {
+        float trackInterval = 0.1f; 
+        while (currentState == State.Trial)
+        {
+            Vector3 currentPosition = paths.headsetTransform.position;
+            positions.Add(currentPosition); 
+
+            var gazeData = VarjoEyeTracking.GetGaze();
+            var eyeMeasurements = VarjoEyeTracking.GetEyeMeasurements();
+
+            if (gazeData.status == VarjoEyeTracking.GazeStatus.Valid)
+            {
+                string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}, {currentPosition.x}, {currentPosition.y}, {currentPosition.z}, {gazeData.gaze.forward.x}, {gazeData.gaze.forward.y}, {gazeData.gaze.forward.z}, {eyeMeasurements.leftPupilDiameterInMM}, {eyeMeasurements.rightPupilDiameterInMM}";
+
+                Write(false, line);
+            }
+
+            // Waits for 'trackInterval' seconds before the next iteration
+            yield return new WaitForSeconds(trackInterval);
+        }
+    }
+
+    String TranslateShapeOrder(int shapeOrder)
+    {
+        if (shapeOrder == 0) return "Circle, Square, Figure-Eight";
+        if (shapeOrder == 1) return "Circle, Figure-Eight, Square";
+        if (shapeOrder == 2) return "Square, Circle, Figure-Eight";
+        if (shapeOrder == 3) return "Square, Figure-Eight, Circle";
+        if (shapeOrder == 4) return "Figure-Eight, Square, Circle";
+        if (shapeOrder == 5) return "Figure-Eight, Circle, Square";
+        else return "SHAPE ORDER INCORRECT"; //never called lol
+    }
+}
+
